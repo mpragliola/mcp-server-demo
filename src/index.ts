@@ -1,16 +1,66 @@
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { LoggingLevel } from "@modelcontextprotocol/sdk/types.js";
 import Database from "better-sqlite3";
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
-// Logger
-// After connect: sends MCP notifications/message to the host.
-// Before connect (fatal startup errors): falls back to stderr.
+// Constants
 // ---------------------------------------------------------------------------
-import type { LoggingLevel } from "@modelcontextprotocol/sdk/types.js";
 
-// stderr fallback — only used before the transport is live
+const SERVER_NAME = "sqlite-tasks";
+const SERVER_VERSION = "1.0.0";
+
+// ---------------------------------------------------------------------------
+// Database
+// ---------------------------------------------------------------------------
+
+const DB_PATH = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "tasks.db",
+);
+
+const db = new Database(DB_PATH);
+db.pragma("journal_mode = WAL");
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tasks (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT    NOT NULL,
+    done  INTEGER NOT NULL DEFAULT 0
+  )
+`);
+
+// Prepared statements — prepare once, execute many.
+const stmt = {
+    list: db.prepare("SELECT * FROM tasks"),
+    getById: db.prepare("SELECT * FROM tasks WHERE id = ?"),
+    insert: db.prepare("INSERT INTO tasks (title) VALUES (?)"),
+    complete: db.prepare("UPDATE tasks SET done = 1 WHERE id = ?"),
+    rename: db.prepare("UPDATE tasks SET title = ? WHERE id = ?"),
+    delete: db.prepare("DELETE FROM tasks WHERE id = ?"),
+} as const;
+
+// ---------------------------------------------------------------------------
+// MCP server
+// ---------------------------------------------------------------------------
+
+const server = new McpServer({
+    name: SERVER_NAME,
+    version: SERVER_VERSION,
+});
+
+// ---------------------------------------------------------------------------
+// Logging
+//
+// After connect:  sends MCP log notifications to the host.
+// Before connect: falls back to stderr so fatal errors are still visible.
+// ---------------------------------------------------------------------------
+
 function logFatal(event: string, data?: Record<string, unknown>) {
     const entry = { ts: new Date().toISOString(), level: "error", event, ...data };
     process.stderr.write(JSON.stringify(entry) + "\n");
@@ -21,66 +71,32 @@ function log(level: LoggingLevel, event: string, data?: Record<string, unknown>)
 }
 
 // ---------------------------------------------------------------------------
-// DB setup
-// ---------------------------------------------------------------------------
-import { fileURLToPath } from "url";
-import path from "path";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const db = new Database(path.join(__dirname, "tasks.db"));
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS tasks (
-    id    INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    done  INTEGER NOT NULL DEFAULT 0
-  )
-`);
-
-// ---------------------------------------------------------------------------
-// MCP Server
-// ---------------------------------------------------------------------------
-const server = new McpServer({
-    name: "sqlite-tasks",
-    version: "1.0.0",
-});
-
-// ---------------------------------------------------------------------------
-// TOOLS  (LLM calls these — may have side effects)
+// Tools  (LLM-invoked — may have side-effects)
 // ---------------------------------------------------------------------------
 
 server.registerTool(
     "list_tasks",
-    {
-        description: "List all tasks in the database",
-        inputSchema: {},
-    },
+    { description: "List all tasks" },
     () => {
-        const tasks = db.prepare("SELECT * FROM tasks").all();
+        const tasks = stmt.list.all();
         log("info", "list_tasks", { count: tasks.length });
-        return {
-            content: [{ type: "text", text: JSON.stringify(tasks, null, 2) }],
-        };
-    }
+        return { content: [{ type: "text", text: JSON.stringify(tasks, null, 2) }] };
+    },
 );
 
 server.registerTool(
     "add_task",
     {
-        description: "Add a new task to the database",
+        description: "Add a new task",
         inputSchema: { title: z.string().describe("The task title") },
     },
     ({ title }) => {
-        const result = db.prepare("INSERT INTO tasks (title) VALUES (?)").run(title);
-        log("info", "add_task", { id: result.lastInsertRowid, title });
+        const { lastInsertRowid } = stmt.insert.run(title);
+        log("info", "add_task", { id: lastInsertRowid, title });
         return {
-            content: [
-                { type: "text", text: `Task created with id ${result.lastInsertRowid}` },
-            ],
+            content: [{ type: "text", text: `Task created with id ${lastInsertRowid}` }],
         };
-    }
+    },
 );
 
 server.registerTool(
@@ -90,27 +106,14 @@ server.registerTool(
         inputSchema: { id: z.number().describe("Task ID to mark as complete") },
     },
     ({ id }) => {
-        const result = db.prepare("UPDATE tasks SET done = 1 WHERE id = ?").run(id);
-        if (result.changes === 0) {
+        const { changes } = stmt.complete.run(id);
+        if (changes === 0) {
             log("warning", "complete_task", { id, outcome: "not_found" });
             return { content: [{ type: "text", text: `No task found with id ${id}` }] };
         }
         log("info", "complete_task", { id });
         return { content: [{ type: "text", text: `Task ${id} marked as done` }] };
-    }
-);
-
-server.registerTool(
-    "delete_task",
-    {
-        description: "Delete a task from the database",
-        inputSchema: { id: z.number().describe("Task ID to delete") },
     },
-    ({ id }) => {
-        db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
-        log("info", "delete_task", { id });
-        return { content: [{ type: "text", text: `Task ${id} deleted` }] };
-    }
 );
 
 server.registerTool(
@@ -120,17 +123,34 @@ server.registerTool(
         inputSchema: {
             id: z.number().describe("Task ID to rename"),
             title: z.string().describe("New title for the task"),
-        }
+        },
     },
     ({ id, title }) => {
-        const result = db.prepare("UPDATE tasks SET title = ? WHERE id = ?").run(title, id);
-        if (result.changes === 0) {
+        const { changes } = stmt.rename.run(title, id);
+        if (changes === 0) {
             log("warning", "rename_task", { id, outcome: "not_found" });
             return { content: [{ type: "text", text: `No task found with id ${id}` }] };
         }
         log("info", "rename_task", { id, title });
         return { content: [{ type: "text", text: `Task ${id} renamed to "${title}"` }] };
-    }
+    },
+);
+
+server.registerTool(
+    "delete_task",
+    {
+        description: "Delete a task",
+        inputSchema: { id: z.number().describe("Task ID to delete") },
+    },
+    ({ id }) => {
+        const { changes } = stmt.delete.run(id);
+        if (changes === 0) {
+            log("warning", "delete_task", { id, outcome: "not_found" });
+            return { content: [{ type: "text", text: `No task found with id ${id}` }] };
+        }
+        log("info", "delete_task", { id });
+        return { content: [{ type: "text", text: `Task ${id} deleted` }] };
+    },
 );
 
 // ---------------------------------------------------------------------------
@@ -146,9 +166,9 @@ server.registerResource(
         log("info", "resource_read", { uri: uri.href, count: tasks.length });
         return {
             contents: [{
-                    uri: uri.href,
-                    mimeType: "application/json",
-                    text: JSON.stringify(tasks, null, 2),
+                uri: uri.href,
+                mimeType: "application/json",
+                text: JSON.stringify(tasks, null, 2),
             }],
         };
     },
@@ -167,9 +187,9 @@ server.registerResource(
         log("info", "resource_read", { uri: uri.href, id });
         return {
             contents: [{
-                    uri: uri.href,
-                    mimeType: "application/json",
-                    text: JSON.stringify(task, null, 2),
+                uri: uri.href,
+                mimeType: "application/json",
+                text: JSON.stringify(task, null, 2),
             }],
         };
     },
@@ -199,7 +219,7 @@ server.registerPrompt(
 );
 
 // ---------------------------------------------------------------------------
-// Start — stdio transport (host spawns this process and talks over stdin/stdout)
+// Lifecycle
 // ---------------------------------------------------------------------------
 
 process.on("SIGINT", () => {
@@ -210,7 +230,7 @@ process.on("SIGINT", () => {
 try {
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    log("info", "server_start", { name: "sqlite-tasks", version: "1.0.0" });
+    log("info", "server_start", { name: SERVER_NAME, version: SERVER_VERSION });
 } catch (err) {
     logFatal("server_start_failed", { error: String(err) });
     process.exit(1);
