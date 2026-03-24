@@ -182,24 +182,26 @@ server.resource(
 );
 
 // ---------------------------------------------------------------------------
-// PROMPTS  (reusable message templates the host can surface as slash commands)
+// Prompts  (reusable message templates the host can surface)
 // ---------------------------------------------------------------------------
 
-server.prompt(
+server.registerPrompt(
     "new-task-prompt",
-    "Turns a rough idea into a clear, actionable task title",
-    { rough_idea: z.string().describe("Your rough task idea") },
+    {
+        description: "Turns a rough idea into a clear, actionable task title",
+        argsSchema: { rough_idea: z.string().describe("Your rough task idea") },
+    },
     ({ rough_idea }) => ({
         messages: [
             {
-                role: "user",
+                role: "user" as const,
                 content: {
-                    type: "text",
+                    type: "text" as const,
                     text: `Turn this rough idea into a clear, actionable task title (max 10 words): "${rough_idea}"`,
                 },
             },
         ],
-    })
+    }),
 );
 
 // ---------------------------------------------------------------------------
