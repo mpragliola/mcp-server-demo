@@ -134,51 +134,45 @@ server.registerTool(
 );
 
 // ---------------------------------------------------------------------------
-// RESOURCES  (LLM/host reads these — read-only, no side effects)
+// Resources  (read-only data the host or LLM can inspect)
 // ---------------------------------------------------------------------------
 
-// Static resource: snapshot of all tasks
-server.resource(
+server.registerResource(
     "tasks-all",
     "tasks://all",
-    { description: "All tasks in the database as a JSON snapshot" },
+    { description: "All tasks as a JSON snapshot" },
     async (uri) => {
-        const tasks = db.prepare("SELECT * FROM tasks").all();
+        const tasks = stmt.list.all();
         log("info", "resource_read", { uri: uri.href, count: tasks.length });
         return {
-            contents: [
-                {
+            contents: [{
                     uri: uri.href,
                     mimeType: "application/json",
                     text: JSON.stringify(tasks, null, 2),
-                },
-            ],
+            }],
         };
-    }
+    },
 );
 
-// Dynamic resource: single task by ID via URI template
-server.resource(
+server.registerResource(
     "task-by-id",
     new ResourceTemplate("tasks://{id}", { list: undefined }),
-    { description: "A single task looked up by its numeric ID" },
+    { description: "A single task by its numeric ID" },
     async (uri, { id }) => {
-        const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
+        const task = stmt.getById.get(id);
         if (!task) {
             log("warning", "resource_read", { uri: uri.href, outcome: "not_found", id });
-            throw new Error(`Task with id ${id} not found`);
+            throw new Error(`Task ${id} not found`);
         }
         log("info", "resource_read", { uri: uri.href, id });
         return {
-            contents: [
-                {
+            contents: [{
                     uri: uri.href,
                     mimeType: "application/json",
                     text: JSON.stringify(task, null, 2),
-                },
-            ],
+            }],
         };
-    }
+    },
 );
 
 // ---------------------------------------------------------------------------
