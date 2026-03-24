@@ -205,6 +205,12 @@ server.prompt(
 // ---------------------------------------------------------------------------
 // Start — stdio transport (host spawns this process and talks over stdin/stdout)
 // ---------------------------------------------------------------------------
+
+process.on("SIGINT", () => {
+    db.close();
+    process.exit(0);
+});
+
 try {
     const transport = new StdioServerTransport();
     await server.connect(transport);
