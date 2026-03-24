@@ -12,7 +12,7 @@ import { z } from "zod";
 // ---------------------------------------------------------------------------
 
 const SERVER_NAME = "sqlite-tasks";
-const SERVER_VERSION = "1.0.0";
+const SERVER_VERSION = "1.0.0"; // @TODO: hardcoded - revise version handling
 
 // ---------------------------------------------------------------------------
 // Database
@@ -24,9 +24,14 @@ const DB_PATH = path.join(
     "tasks.db",
 );
 
+// We activate WAL on SQLite. It allows to store intents to change in a separate log,
+// improving crash safety (changes can be replayed - or discarded if uncommitted -
+// without touching the main DB mid-transaction), concurrency (between readers and
+// writers), and performance (sequential appending vs. random access)
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 
+// Create DB if missing
 db.exec(`
   CREATE TABLE IF NOT EXISTS tasks (
     id    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,8 +62,8 @@ const server = new McpServer({
 // ---------------------------------------------------------------------------
 // Logging
 //
-// After connect:  sends MCP log notifications to the host.
-// Before connect: falls back to stderr so fatal errors are still visible.
+// MCP has its own logging mechanism, which is based on stdout. We will log 
+// directly on stderr only on server initialization with these functions.
 // ---------------------------------------------------------------------------
 
 function logFatal(event: string, data?: Record<string, unknown>) {
@@ -222,6 +227,7 @@ server.registerPrompt(
 // Lifecycle
 // ---------------------------------------------------------------------------
 
+// Graceful shutdown
 process.on("SIGINT", () => {
     db.close();
     process.exit(0);
